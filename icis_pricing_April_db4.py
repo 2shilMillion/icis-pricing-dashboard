@@ -234,7 +234,7 @@ if "forecast_insights" not in st.session_state:
     st.session_state.forecast_insights = None
 
 if "user_role" not in st.session_state:
-    st.session_state.user_role = "General Analyst"
+    st.session_state.user_role = "Analyst"
 
 if "current_formula" not in st.session_state:
     st.session_state.current_formula = None
@@ -1140,7 +1140,7 @@ def call_groq_llm(prompt, system=""):
         log_debug("Groq LLM Error", str(e)[:100])
         return f"❌ Error: {str(e)}"
 
-def generate_data_pulled_insights(df_pricing, user_role="General Analyst"):
+def generate_data_pulled_insights(df_pricing, user_role="Analyst"):
     """Generate insights when data pulled"""
     try:
         if df_pricing is None or df_pricing.empty:
@@ -1197,7 +1197,7 @@ Be specific, actionable, and data-driven."""
         log_debug("Data Insights Error", str(e)[:100])
         return None
 
-def generate_forecast_insights(df_forecast, user_role="General Analyst"):
+def generate_forecast_insights(df_forecast, user_role="Analyst"):
     """Generate AI insights for forecast data"""
     try:
         if df_forecast is None or df_forecast.empty:
@@ -1254,7 +1254,7 @@ Be strategic and forward-looking."""
         log_debug("Forecast Insights Error", str(e)[:100])
         return None
 
-def generate_blend_insights(blend_name, components, df_composite_price, user_role="General Analyst"):
+def generate_blend_insights(blend_name, components, df_composite_price, user_role="Analyst"):
     """Generate insights on blend meaning and outlook"""
     try:
         if df_composite_price is None or df_composite_price.empty:
@@ -1302,7 +1302,7 @@ Be insightful and practical."""
         log_debug("Blend Insights Error", str(e)[:100])
         return None
 
-def generate_formula_analysis(df_pricing, formula_name, formula_components, user_role="General Analyst"):
+def generate_formula_analysis(df_pricing, formula_name, formula_components, user_role="Analyst"):
     """Generate forecast analysis"""
     try:
         df = df_pricing.copy()
@@ -1568,7 +1568,7 @@ with st.sidebar:
     st.subheader("👤 Your Role")
     user_role = st.selectbox(
         "Select your role",
-        ["General Analyst", "Trader", "Producer", "Supplier", "Risk Manager"]
+        ["Analyst", "Trader", "Producer", "Supplier", "Risk Manager"]
     )
     st.session_state.user_role = user_role
     
