@@ -1,22 +1,20 @@
 """
 ICIS Pricing Dashboard - COMPLETE ENHANCED APPLICATION
-✅ Real pricing data fetching with AI insights
+✅ Real pricing data fetching
 ✅ Forecast series with BATCHED XML requests (not individual)
 ✅ Debug section with execution logs & XML display
 ✅ FX & unit normalization with normalized charts
 ✅ Price driver analysis
-✅ Scenario analysis with AI
-✅ ML forecasting with AI analysis
+✅ Scenario analysis
+✅ ML forecasting
 ✅ Formula builder with component curves visualization
-✅ Apply & compare formulas with blend insights (FIXED - NOW DISPLAYS!)
-✅ AI-powered insights for different user roles
-✅ Smart chat interface
+✅ Apply & compare formulas with blend visualization
+✅ Smart data display
 ✅ All features fully integrated
 ✅ Publication-based series selection with multi-select
 ✅ Forecast data with multi-series normalization
 ✅ BATCHED Forecast XML (single request for all series)
 ✅ Component curves on blend charts
-✅ Blend meaning & outlook insights
 ✅ Normalized charts showing applied units/currency
 """
 
@@ -35,6 +33,8 @@ import xml.etree.ElementTree as ET
 import json
 import re
 from pathlib import Path
+from difflib import SequenceMatcher
+import time
 
 load_dotenv()
 
@@ -43,8 +43,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-GROQ_API_KEY = os.getenv("GROQ_API_KEY")
 
 # ============================
 # OPTIONAL DEPENDENCIES
@@ -203,6 +201,19 @@ if "df_pricing_normalized" not in st.session_state:
 if "df_forecast_normalized" not in st.session_state:
     st.session_state.df_forecast_normalized = None
 
+# Excel import/autoselect session state
+if "real_excel_publications" not in st.session_state:
+    st.session_state.real_excel_publications = []
+if "real_excel_processed" not in st.session_state:
+    st.session_state.real_excel_processed = False
+if "auto_selected_real_series" not in st.session_state:
+    st.session_state.auto_selected_real_series = []
+
+if "forecast_excel_publications" not in st.session_state:
+    st.session_state.forecast_excel_publications = []
+if "forecast_excel_processed" not in st.session_state:
+    st.session_state.forecast_excel_processed = False
+
 if "selected_series_multi" not in st.session_state:
     st.session_state.selected_series_multi = []
 
@@ -215,23 +226,11 @@ if "selected_forecast_publication" not in st.session_state:
 if "custom_formulas" not in st.session_state:
     st.session_state.custom_formulas = {}
 
-if "chat_history" not in st.session_state:
-    st.session_state.chat_history = []
-
 if "fx_rates" not in st.session_state:
     st.session_state.fx_rates = {}
 
 if "forecasts" not in st.session_state:
     st.session_state.forecasts = {}
-
-if "forecast_analysis" not in st.session_state:
-    st.session_state.forecast_analysis = {}
-
-if "data_pulled_insights" not in st.session_state:
-    st.session_state.data_pulled_insights = None
-
-if "forecast_insights" not in st.session_state:
-    st.session_state.forecast_insights = None
 
 if "user_role" not in st.session_state:
     st.session_state.user_role = "Analyst"
@@ -244,9 +243,6 @@ if "current_formula_name" not in st.session_state:
 
 if "current_formula_components" not in st.session_state:
     st.session_state.current_formula_components = []
-
-if "current_blend_insights" not in st.session_state:
-    st.session_state.current_blend_insights = None
 
 if "current_normalization_currency" not in st.session_state:
     st.session_state.current_normalization_currency = "USD"
@@ -370,6 +366,49 @@ def normalize_forecast_dataframe(df, target_currency="USD"):
     df_norm['Currency_normalized'] = target_currency
     return df_norm
 
+
+# ============================
+# EXCEL WORKBOOK PROCESSING & FUZZY MATCH
+# ============================
+
+def process_publications_excel(excel_file):
+    """Extract publication names from an uploaded Excel workbook"""
+    try:
+        df = pd.read_excel(excel_file)
+        # find a column that looks like 'publication'
+        pub_cols = [c for c in df.columns if 'publication' in str(c).lower()]
+        if not pub_cols:
+            # try common alternatives
+            pub_cols = [c for c in df.columns if 'pub' in str(c).lower()]
+
+        if not pub_cols:
+            return []
+
+        pubs = df[pub_cols[0]].dropna().astype(str).str.strip().unique().tolist()
+        return pubs
+    except Exception as e:
+        log_debug("Excel Processing Error", str(e))
+        return []
+
+
+def fuzzy_match_publication(excel_pub, api_publications, threshold=0.6):
+    """Return best match from api_publications for excel_pub using SequenceMatcher.
+    Returns (best_match, score) or (None, 0)
+    """
+    best = None
+    best_score = 0.0
+    p = str(excel_pub).lower().strip()
+    for ap in api_publications:
+        a = str(ap).lower().strip()
+        score = SequenceMatcher(None, p, a).ratio()
+        if score > best_score:
+            best_score = score
+            best = ap
+
+    if best_score >= threshold:
+        return best, best_score
+    return None, 0.0
+
 # ============================
 # UTILITY FUNCTIONS
 # ============================
@@ -440,6 +479,10 @@ PRICING_DATA_XML_TEMPLATE = """<request xmlns="http://iddn.icis.com/ns/search">
          <compare field="c:series-order" op="le" value="{end_date}"/>
       </and>
    </constraints>
+    <options>
+        <max-results>5000</max-results>
+        <order-by key="series-order" direction="ascending" />
+    </options>
    <view>
       <field>c:series.f:name</field>
       <field>c:series.f:currency.f:name</field>
@@ -670,6 +713,8 @@ def parse_pricing_data(response_content):
             
             for col in ['Low', 'High', 'Mid']:
                 if col in df.columns:
+                    # strip non-numeric characters (commas, currency symbols) before conversion
+                    df[col] = df[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True)
                     df[col] = pd.to_numeric(df[col], errors='coerce')
         
         log_debug("Pricing Data Parsed", f"Total: {len(df)}")
@@ -808,6 +853,12 @@ def fetch_series_list(username, password):
         st.info(f"✅ {len(response.content):,} bytes")
         return parse_series_list(response.content)
     
+    except requests.exceptions.HTTPError as he:
+        resp = he.response
+        msg = f"HTTP {resp.status_code} - {resp.reason}: {resp.text[:2000]}"
+        log_debug("Fetch Series HTTPError", msg[:200])
+        st.error(f"❌ {msg}")
+        return pd.DataFrame()
     except Exception as e:
         log_debug("Fetch Series Error", str(e)[:100])
         st.error(f"❌ {str(e)}")
@@ -840,6 +891,12 @@ def fetch_forecast_series_list(username, password):
         st.info(f"✅ {len(response.content):,} bytes")
         return parse_forecast_series_list(response.content)
     
+    except requests.exceptions.HTTPError as he:
+        resp = he.response
+        msg = f"HTTP {resp.status_code} - {resp.reason}: {resp.text[:2000]}"
+        log_debug("Fetch Forecast Series HTTPError", msg[:200])
+        st.error(f"❌ {msg}")
+        return pd.DataFrame()
     except Exception as e:
         log_debug("Fetch Forecast Series Error", str(e)[:100])
         st.error(f"❌ {str(e)}")
@@ -890,6 +947,18 @@ def fetch_pricing_data(username, password, series_ids, start_date, end_date):
         st.info(f"✅ {len(response.content):,} bytes")
         return parse_pricing_data(response.content)
     
+    except requests.exceptions.HTTPError as he:
+        resp = he.response
+        if resp is not None and resp.status_code == 409:
+            # server-side schema validation conflict - attempt batched requests
+            log_debug("Fetch Pricing HTTPError 409", resp.text[:400])
+            st.warning("⚠️ 409 Conflict from API — attempting batched requests (chunks of 100)")
+            return fetch_pricing_data_batched(username, password, series_ids, start_date, end_date, chunk_size=100)
+        # Surface detailed response for other HTTP errors
+        msg = f"HTTP {resp.status_code} - {resp.reason}: {resp.text[:4000]}"
+        log_debug("Fetch Pricing HTTPError", msg[:200])
+        st.error(f"❌ {msg}")
+        return pd.DataFrame()
     except Exception as e:
         log_debug("Fetch Pricing Error", str(e)[:100])
         st.error(f"❌ {str(e)}")
@@ -940,8 +1009,88 @@ def fetch_forecast_data_batched(username, password, series_ids, start_date, end_
         st.info(f"✅ {len(response.content):,} bytes - {len(series_ids)} series in 1 request")
         return parse_forecast_data_batched(response.content)
     
+    except requests.exceptions.HTTPError as he:
+        resp = he.response
+        msg = f"HTTP {resp.status_code} - {resp.reason}: {resp.text[:2000]}"
+        log_debug("Fetch Forecast HTTPError", msg[:200])
+        st.error(f"❌ {msg}")
+        return pd.DataFrame()
     except Exception as e:
         log_debug("Fetch Forecast Error", str(e)[:100])
+        st.error(f"❌ {str(e)}")
+        return pd.DataFrame()
+
+
+def fetch_pricing_data_batched(username, password, series_ids, start_date, end_date, chunk_size=100, delay=0.25):
+    """Fetch pricing data by splitting series_ids into smaller batches and merging results."""
+    try:
+        log_debug("Fetch Pricing Data (Batched)", f"Series: {len(series_ids)}, ChunkSize: {chunk_size}, Dates: {start_date} to {end_date}")
+        all_parts = []
+        total = len(series_ids)
+        for i in range(0, total, chunk_size):
+            part = series_ids[i:i+chunk_size]
+            series_lines = [f"      <series>http://iddn.icis.com/series/petchem/{sid}</series>" for sid in part]
+            series_elements = "\n".join(series_lines)
+
+            xml_request = PRICING_DATA_XML_TEMPLATE.format(
+                series_elements=series_elements,
+                start_date=start_date.strftime("%Y-%m-%d"),
+                end_date=end_date.strftime("%Y-%m-%d")
+            )
+
+            batch_idx = (i // chunk_size) + 1
+            log_xml_request(
+                f"Pricing Data - Batch {batch_idx}",
+                xml_request,
+                f"Batch {batch_idx} of {((total-1)//chunk_size)+1}: {len(part)} series",
+                series_count=len(part)
+            )
+
+            headers = {
+                "Content-Type": "application/xml",
+                "Accept": "application/atom+xml",
+                "Authorization": get_basic_auth_header(username, password)
+            }
+
+            with st.spinner(f"Fetching pricing batch {batch_idx} ({len(part)} series)..."):
+                response = requests.post(
+                    ICIS_API_ENDPOINT,
+                    data=xml_request.encode('utf-8'),
+                    headers=headers,
+                    timeout=45,
+                    verify=True
+                )
+
+            try:
+                response.raise_for_status()
+            except requests.exceptions.HTTPError as he:
+                resp = he.response
+                msg = f"Batch {batch_idx} HTTP {resp.status_code}: {resp.text[:1000]}"
+                log_debug("Fetch Pricing Batch HTTPError", msg[:200])
+                st.error(f"❌ {msg}")
+                # skip this batch and continue
+                continue
+
+            df_part = parse_pricing_data(response.content)
+            if not df_part.empty:
+                all_parts.append(df_part)
+
+            time.sleep(delay)
+
+        if not all_parts:
+            log_debug("Fetch Pricing Data (Batched)", "No data returned from any batch")
+            return pd.DataFrame()
+
+        df_total = pd.concat(all_parts, ignore_index=True)
+        # de-duplicate on Series Name + Date + Location
+        if {'Series Name', 'Date'}.issubset(df_total.columns):
+            df_total = df_total.drop_duplicates(subset=['Series Name', 'Date'], keep='first').reset_index(drop=True)
+
+        log_debug("Fetch Pricing Data (Batched)", f"Merged records: {len(df_total)} from {len(all_parts)} batches")
+        return df_total
+
+    except Exception as e:
+        log_debug("Fetch Pricing Data (Batched) Error", str(e)[:200])
         st.error(f"❌ {str(e)}")
         return pd.DataFrame()
 
@@ -1090,277 +1239,6 @@ def calculate_scenario_analysis(base_price, driver_changes):
     }
 
 # ============================
-# LLM INTEGRATION
-# ============================
-
-def call_groq_llm(prompt, system=""):
-    """Call Groq LLM"""
-    try:
-        if not GROQ_API_KEY:
-            return "❌ Error: GROQ_API_KEY not found"
-        
-        from groq import Groq
-        
-        log_debug("Groq LLM Call", "Starting...")
-        
-        client = Groq(api_key=GROQ_API_KEY)
-        
-        models_to_try = [
-            "mixtral-8x7b-32768",
-            "llama-3.1-70b-versatile",
-            "llama-3.1-8b-instant",
-        ]
-        
-        for model in models_to_try:
-            try:
-                completion = client.chat.completions.create(
-                    messages=[
-                        {"role": "system", "content": system or "You are an expert petrochemical market analyst."},
-                        {"role": "user", "content": prompt}
-                    ],
-                    model=model,
-                    temperature=0.7,
-                    max_tokens=2000,
-                )
-                
-                response_text = completion.choices[0].message.content
-                log_debug("Groq LLM Success", f"Model: {model}, Length: {len(response_text)}")
-                return response_text
-            except Exception as e:
-                if "decommissioned" in str(e).lower() or "model_not_found" in str(e).lower():
-                    log_debug("Groq Model Skip", f"Model {model} unavailable")
-                    continue
-                else:
-                    log_debug("Groq Error", str(e)[:100])
-                    return f"❌ Error: {str(e)}"
-        
-        return "❌ No available Groq models"
-    
-    except Exception as e:
-        log_debug("Groq LLM Error", str(e)[:100])
-        return f"❌ Error: {str(e)}"
-
-def generate_data_pulled_insights(df_pricing, user_role="Analyst"):
-    """Generate insights when data pulled"""
-    try:
-        if df_pricing is None or df_pricing.empty:
-            return None
-        
-        df_numeric = df_pricing.copy()
-        df_numeric['Mid'] = pd.to_numeric(df_numeric['Mid'], errors='coerce')
-        
-        price_stats = df_numeric['Mid'].describe()
-        volatility = (df_numeric.groupby('Series Name')['Mid'].std() / df_numeric.groupby('Series Name')['Mid'].mean() * 100).mean()
-        
-        summary = f"""
-DATA ANALYSIS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📊 Dataset:
-- Records: {len(df_numeric)}
-- Series: {df_numeric['Series Name'].nunique()}
-- Period: {df_numeric['Date'].min()} to {df_numeric['Date'].max()}
-- Days: {(df_numeric['Date'].max() - df_numeric['Date'].min()).days}
-
-📍 Geographic:
-- Locations: {', '.join(df_numeric['Location'].unique())}
-- Currencies: {', '.join(df_numeric['Currency'].unique())}
-- Units: {', '.join(df_numeric['Unit'].unique())}
-
-📈 Prices:
-- Avg: ${price_stats['mean']:.2f}
-- Min: ${price_stats['min']:.2f}
-- Max: ${price_stats['max']:.2f}
-- Std Dev: ${price_stats['std']:.2f}
-- Volatility: {volatility:.1f}%
-
-Top 5 Series by Price:
-{df_numeric.groupby('Series Name')['Mid'].mean().nlargest(5).to_string()}
-"""
-        
-        prompt = f"""{summary}
-
-Provide KEY INSIGHTS for {user_role}:
-1. Current market status and trends
-2. Key price patterns and drivers
-3. Business implications
-4. Risk alerts and volatility assessment
-5. Opportunities and recommendations
-6. Next steps
-
-Be specific, actionable, and data-driven."""
-        
-        insights = call_groq_llm(prompt, system="You are an expert petrochemical market analyst.")
-        log_debug("Data Insights Generated", "Success")
-        return insights
-    
-    except Exception as e:
-        log_debug("Data Insights Error", str(e)[:100])
-        return None
-
-def generate_forecast_insights(df_forecast, user_role="Analyst"):
-    """Generate AI insights for forecast data"""
-    try:
-        if df_forecast is None or df_forecast.empty:
-            return None
-        
-        df_numeric = df_forecast.copy()
-        if 'Mid' in df_numeric.columns:
-            df_numeric['Mid'] = pd.to_numeric(df_numeric['Mid'], errors='coerce')
-        
-        series_count = df_numeric['Series Name'].nunique() if 'Series Name' in df_numeric.columns else 0
-        
-        price_stats = df_numeric['Mid'].describe() if 'Mid' in df_numeric.columns else None
-        
-        forecast_dates = sorted(df_numeric['Forecast Date'].unique()) if 'Forecast Date' in df_numeric.columns else []
-        
-        summary = f"""
-FORECAST DATA ANALYSIS - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📊 Dataset:
-- Total Records: {len(df_numeric)}
-- Series: {series_count}
-- Forecast Dates: {len(forecast_dates)}
-- Date Range: {forecast_dates[0] if forecast_dates else 'N/A'} to {forecast_dates[-1] if forecast_dates else 'N/A'}
-
-📈 Price Statistics:
-"""
-        if price_stats is not None:
-            summary += f"""- Avg: ${price_stats['mean']:.2f}
-- Min: ${price_stats['min']:.2f}
-- Max: ${price_stats['max']:.2f}
-- Std Dev: ${price_stats['std']:.2f}"""
-        
-        if 'Series Name' in df_numeric.columns:
-            top_series = df_numeric.groupby('Series Name')['Mid'].mean().nlargest(5)
-            summary += f"\n\nTop Forecast Prices:\n{top_series.to_string()}"
-        
-        prompt = f"""{summary}
-
-For {user_role}, provide:
-1. Forecast market direction (up/down/stable)
-2. Key drivers of forecasted prices
-3. Confidence level (high/medium/low) and why
-4. Major risks and uncertainties
-5. Investment outlook and recommendations
-6. Comparison to current pricing if available
-
-Be strategic and forward-looking."""
-        
-        insights = call_groq_llm(prompt, system="You are an expert petrochemical market analyst specializing in forecasting.")
-        log_debug("Forecast Insights Generated", "Success")
-        return insights
-    
-    except Exception as e:
-        log_debug("Forecast Insights Error", str(e)[:100])
-        return None
-
-def generate_blend_insights(blend_name, components, df_composite_price, user_role="Analyst"):
-    """Generate insights on blend meaning and outlook"""
-    try:
-        if df_composite_price is None or df_composite_price.empty:
-            return None
-        
-        avg_price = df_composite_price['Composite Price'].mean()
-        min_price = df_composite_price['Composite Price'].min()
-        max_price = df_composite_price['Composite Price'].max()
-        volatility = df_composite_price['Composite Price'].std()
-        
-        component_str = "\n".join([f"  - {c['name']}: {c['weight']*100:.1f}%" for c in components])
-        
-        summary = f"""
-CUSTOM BLEND ANALYSIS - {blend_name}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-📦 Formula:
-{component_str}
-
-📈 Performance:
-- Average Price: ${avg_price:.2f}
-- Price Range: ${min_price:.2f} - ${max_price:.2f}
-- Volatility: ${volatility:.2f} ({(volatility/avg_price)*100:.1f}%)
-- Historical Days: {len(df_composite_price)}
-"""
-        
-        prompt = f"""{summary}
-
-For {user_role}, explain:
-1. What does this blend represent in the market?
-2. Primary use cases and applications
-3. Risk profile (high/medium/low volatility)
-4. Price drivers and their relative importance
-5. Market outlook for this blend (next 3-6 months)
-6. Hedging strategies
-7. Competitive positioning
-
-Be insightful and practical."""
-        
-        insights = call_groq_llm(prompt, system="You are an expert petrochemical product analyst.")
-        log_debug("Blend Insights Generated", "Success")
-        return insights
-    
-    except Exception as e:
-        log_debug("Blend Insights Error", str(e)[:100])
-        return None
-
-def generate_formula_analysis(df_pricing, formula_name, formula_components, user_role="Analyst"):
-    """Generate forecast analysis"""
-    try:
-        df = df_pricing.copy()
-        df['Mid'] = pd.to_numeric(df['Mid'], errors='coerce')
-        
-        current_price = df['Mid'].mean()
-        
-        component_prices = []
-        for comp in formula_components:
-            comp_data = df[df['Series Name'].str.contains(comp['name'], case=False, na=False)]
-            if not comp_data.empty:
-                component_prices.append({
-                    'name': comp['name'],
-                    'weight': comp['weight'],
-                    'avg_price': comp_data['Mid'].mean()
-                })
-        
-        hist_high = df['Mid'].max()
-        hist_low = df['Mid'].min()
-        hist_avg = df['Mid'].mean()
-        hist_volatility = df['Mid'].std()
-        
-        summary = f"""
-FORMULA - {formula_name}
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-
-Current:
-- Price: ${current_price:.2f}
-- High: ${hist_high:.2f}
-- Low: ${hist_low:.2f}
-- Volatility: ${hist_volatility:.2f} ({(hist_volatility/hist_avg)*100:.1f}%)
-
-Components:
-"""
-        for comp in component_prices:
-            summary += f"\n- {comp['name']} ({comp['weight']*100:.0f}%): ${comp['avg_price']:.2f}"
-        
-        prompt = f"""{summary}
-
-For {user_role}, analyze:
-1. Is this formula balanced?
-2. What's driving the composite price?
-3. Risk assessment
-4. Hedging opportunities
-5. Market positioning
-6. Recommendations
-
-Be analytical."""
-        
-        analysis = call_groq_llm(prompt, system="You are a petrochemical market analyst.")
-        log_debug("Formula Analysis Generated", "Success")
-        return analysis
-    
-    except Exception as e:
-        log_debug("Formula Analysis Error", str(e)[:100])
-        return None
-
-# ============================
 # FORMULA FUNCTIONS
 # ============================
 
@@ -1480,8 +1358,8 @@ def apply_custom_css():
     """Apply custom CSS styling"""
     st.markdown("""
     <style>
-    /* Insight box styling */
-    .insight-box {
+    /* Data box styling */
+    .data-box {
         background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
         padding: 20px;
         border-radius: 10px;
@@ -1490,16 +1368,16 @@ def apply_custom_css():
         margin: 10px 0;
     }
     
-    .insight-box h3 {
+    .data-box h3 {
         color: #00d4ff;
         margin-top: 0;
     }
     
-    .insight-box ul {
+    .data-box ul {
         margin: 10px 0;
     }
     
-    .insight-box li {
+    .data-box li {
         margin: 5px 0;
         line-height: 1.6;
     }
@@ -1550,9 +1428,9 @@ st.title("🛢️ ICIS Pricing Dashboard - ENHANCED")
 
 st.markdown("""
 <div style="background-color: #0f766e; padding: 15px; border-radius: 10px; margin-bottom: 20px;">
-    <h3 style="color: #fff; margin: 0;">✅ COMPLETE ENHANCED PLATFORM</h3>
+    <h3 style="color: #fff; margin: 0;">✅ COMPLETE PLATFORM</h3>
     <p style="color: #d1fae5; margin: 5px 0;">
-        📊 Real pricing | 🔮 Forecasts (Batched XML) | 💱 Normalized Charts | 🧪 Blend Components | 🤖 AI Insights | 🔍 Debug
+        📊 Real pricing | 🔮 Forecasts (Batched XML) | 💱 Normalized Charts | 🧪 Blend Components | 🔍 Debug
     </p>
 </div>
 """, unsafe_allow_html=True)
@@ -1574,11 +1452,6 @@ with st.sidebar:
     
     st.divider()
     
-    if not GROQ_API_KEY:
-        st.error("⚠️ GROQ_API_KEY not set")
-    else:
-        st.success("✅ Groq LLM Ready")
-    
     if ML_AVAILABLE:
         st.info("✅ ML Available")
     
@@ -1597,8 +1470,6 @@ with st.sidebar:
         "🧮 Formula Builder",
         "📊 Apply Formulas",
         "📈 Compare Formulas",
-        "🤖 AI Insights",
-        "💬 Chat",
         "🔍 XML API Scripts",
         "🐛 Debug Logs"
     ])
@@ -1625,46 +1496,47 @@ if page == "📊 Dashboard":
     
     st.divider()
     
-    st.subheader("✨ Key Enhancements")
+    st.subheader("✨ Key Features")
     
     col1, col2, col3 = st.columns(3)
     
     with col1:
         st.markdown("""
-        ### 🤖 AI Insights
-        - **Pricing Tab**: Dynamic insights when data pulled
-        - **Forecast Tab**: AI analysis of forecasts
-        - **Blend Tab**: Insights on formula meaning
-        
         ### 💱 Normalized Charts
         - Currency conversion (USD/EUR/GBP)
         - Unit normalization
         - Applied units shown on charts
-        """)
-    
-    with col2:
-        st.markdown("""
+        
         ### 📊 Blend Visualization
         - Component curves (dashed lines)
         - Blended price (solid line)
         - Component details in hover
-        - Full blend insights & outlook
-        
-        ### ✅ Batched Forecast XML
+        """)
+    
+    with col2:
+        st.markdown("""
+        ### ✅ Batched XML Requests
         - All series in ONE request
-        - Same as pricing approach
+        - Efficient data fetching
         - Visible in Debug tab
+        
+        ### 📈 Formula Management
+        - Build custom formulas
+        - Component tracking
+        - Price calculations
         """)
     
     with col3:
         st.markdown("""
-        ### 📈 Feature Highlights
-        - Real-time market data
-        - ML forecasting
-        - Scenario analysis
-        - Formula builder
-        - Smart chat
-        - Full API debugging
+        ### 🔍 Full Debugging
+        - XML request logging
+        - Debug event tracking
+        - Response monitoring
+        
+        ### 📈 ML Forecasting
+        - Trend analysis
+        - Confidence bands
+        - Multi-series support
         """)
 
 # ============================
@@ -1700,6 +1572,62 @@ elif page == "🔍 Real Series":
     if df_list is None or df_list.empty:
         st.info("Click 'Load Series' to start")
     else:
+        st.subheader("📋 Quick Load via Excel")
+        excel_file = st.file_uploader("Upload Publications Excel (xlsx/xls)", type=["xlsx", "xls"], key="real_excel_upload")
+        if excel_file is not None and not st.session_state.real_excel_processed:
+            pubs = process_publications_excel(excel_file)
+            if pubs:
+                st.session_state.real_excel_publications = pubs
+                st.session_state.real_excel_processed = True
+                st.success(f"✅ Loaded {len(pubs)} publications from Excel")
+            else:
+                st.warning("No publications found in Excel")
+
+        if st.session_state.real_excel_processed and st.session_state.real_excel_publications:
+            st.markdown("**Publications from Excel:**")
+            for p in st.session_state.real_excel_publications:
+                st.write(f"- {p}")
+
+            # allow threshold tweak
+            fuzzy_thresh = st.slider("Fuzzy match threshold", 0.4, 0.95, 0.6, 0.05, key="real_fuzzy_thresh")
+            if st.button("🎯 Auto-Select from Excel (Fuzzy Match)", key="auto_select_from_excel_real"):
+                api_pubs = sorted(df_list['Publication Name'].unique().tolist())
+                st.session_state.auto_selected_real_series = []
+                seen = set()
+                for ep in st.session_state.real_excel_publications:
+                    matched, score = fuzzy_match_publication(ep, api_pubs, threshold=fuzzy_thresh)
+                    if matched:
+                        rows = df_list[df_list['Publication Name'] == matched]
+                        for _, r in rows.iterrows():
+                            sid = r['Series ID']
+                            if sid not in seen:
+                                st.session_state.auto_selected_real_series.append({
+                                    'Series Name': r['Series Name'],
+                                    'Series ID': sid,
+                                    'Publication': matched
+                                })
+                                seen.add(sid)
+                    # record match summary for UI (matched or not)
+                    if 'matches_summary_real' not in st.session_state:
+                        st.session_state.matches_summary_real = []
+                    st.session_state.matches_summary_real.append({
+                        'Excel Publication': ep,
+                        'Matched Publication': matched if matched else '',
+                        'Score': round(score, 3) if matched else 0.0,
+                        'Matched': '✓' if matched else '✗'
+                    })
+                # merge into selected_series_multi without duplicates
+                for s in st.session_state.auto_selected_real_series:
+                    if not any(x['Series ID'] == s['Series ID'] for x in st.session_state.selected_series_multi):
+                        st.session_state.selected_series_multi.append(s)
+                st.success(f"✅ Auto-selected {len(st.session_state.auto_selected_real_series)} series")
+                # show a summary table of matches
+                if st.session_state.get('matches_summary_real'):
+                    ms_df = pd.DataFrame(st.session_state.matches_summary_real)
+                    st.divider()
+                    st.subheader("🔎 Excel -> Publication Match Summary")
+                    st.dataframe(ms_df, use_container_width=True)
+                st.rerun()
         st.subheader(f"📋 Available Series: {len(df_list)}")
         
         col1, col2, col3 = st.columns(3)
@@ -1765,11 +1693,6 @@ elif page == "🔍 Real Series":
                     
                     if not df_pricing.empty:
                         st.session_state.df_pricing_data = df_pricing
-                        
-                        with st.spinner("🤖 Analyzing data..."):
-                            insights = generate_data_pulled_insights(df_pricing, st.session_state.user_role)
-                            st.session_state.data_pulled_insights = insights
-                        
                         st.success(f"✅ {len(df_pricing)} records")
                         st.rerun()
 
@@ -1870,37 +1793,70 @@ elif page == "🔮 Forecast Series":
                     
                     if not df_forecast.empty:
                         st.session_state.df_forecast_data = df_forecast
-                        
-                        with st.spinner("🤖 Analyzing forecasts..."):
-                            insights = generate_forecast_insights(df_forecast, st.session_state.user_role)
-                            st.session_state.forecast_insights = insights
-                        
                         st.success(f"✅ {len(df_forecast)} records from {len(series_ids)} series in 1 request")
                         st.rerun()
                     else:
                         st.warning("No forecast data retrieved")
 
+        # ===== Forecast Excel import & auto-select =====
+        st.divider()
+        st.subheader("📋 Quick Load Forecasts via Excel")
+        f_excel = st.file_uploader("Upload Forecast Publications Excel (xlsx/xls)", type=["xlsx", "xls"], key="forecast_excel_upload")
+        if f_excel is not None and not st.session_state.forecast_excel_processed:
+            pubs = process_publications_excel(f_excel)
+            if pubs:
+                st.session_state.forecast_excel_publications = pubs
+                st.session_state.forecast_excel_processed = True
+                st.success(f"✅ Loaded {len(pubs)} publications from Excel")
+            else:
+                st.warning("No publications found in Excel")
+
+        if st.session_state.forecast_excel_processed and st.session_state.forecast_excel_publications:
+            st.markdown("**Publications from Excel:**")
+            for p in st.session_state.forecast_excel_publications:
+                st.write(f"- {p}")
+
+            f_thresh = st.slider("Forecast fuzzy threshold", 0.4, 0.95, 0.6, 0.05, key="fcst_fuzzy_thresh")
+            if st.button("🎯 Auto-Select Forecasts from Excel (Fuzzy Match)", key="auto_select_from_excel_fcst"):
+                api_pubs = sorted(df_fcst['Publication Name'].unique().tolist())
+                st.session_state.selected_forecast_series_multi = []
+                seen = set()
+                for ep in st.session_state.forecast_excel_publications:
+                    matched, score = fuzzy_match_publication(ep, api_pubs, threshold=f_thresh)
+                    if matched:
+                        rows = df_fcst[df_fcst['Publication Name'] == matched]
+                        for _, r in rows.iterrows():
+                            sid = r['Series ID']
+                            if sid not in seen:
+                                st.session_state.selected_forecast_series_multi.append({
+                                    'Series Name': r['Series Name'],
+                                    'Series ID': sid,
+                                    'Publication': matched
+                                })
+                                seen.add(sid)
+                    # record match summary for UI
+                    if 'matches_summary_fcst' not in st.session_state:
+                        st.session_state.matches_summary_fcst = []
+                    st.session_state.matches_summary_fcst.append({
+                        'Excel Publication': ep,
+                        'Matched Publication': matched if matched else '',
+                        'Score': round(score, 3) if matched else 0.0,
+                        'Matched': '✓' if matched else '✗'
+                    })
+                st.success(f"✅ Auto-selected {len(st.session_state.selected_forecast_series_multi)} forecast series")
+                if st.session_state.get('matches_summary_fcst'):
+                    ms_df = pd.DataFrame(st.session_state.matches_summary_fcst)
+                    st.divider()
+                    st.subheader("🔎 Excel -> Publication Match Summary (Forecast)")
+                    st.dataframe(ms_df, use_container_width=True)
+                st.rerun()
+
 # ============================
-# PRICING DATA PAGE WITH AI
+# PRICING DATA PAGE
 # ============================
 
 elif page == "📈 Pricing Data":
     st.subheader("📈 Real Pricing Data")
-    
-    if st.session_state.data_pulled_insights:
-        with st.container():
-            st.markdown("---")
-            st.subheader("🤖 AI Analysis - Data Pull")
-            st.info(f"For: **{st.session_state.user_role}**")
-            
-            with st.expander("📊 View Insights", expanded=True):
-                st.markdown("""
-                <div class="insight-box">
-                """ + st.session_state.data_pulled_insights.replace('\n', '<br>') + """
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
     
     df = st.session_state.df_pricing_data
     
@@ -1936,26 +1892,11 @@ elif page == "📈 Pricing Data":
                 st.plotly_chart(fig, use_container_width=True)
 
 # ============================
-# FORECAST DATA PAGE WITH AI & NORMALIZATION
+# FORECAST DATA PAGE
 # ============================
 
 elif page == "📊 Forecast Data":
     st.subheader("📊 Forecast Data")
-    
-    if st.session_state.forecast_insights:
-        with st.container():
-            st.markdown("---")
-            st.subheader("🤖 AI Analysis - Forecast Data")
-            st.info(f"For: **{st.session_state.user_role}**")
-            
-            with st.expander("📊 View Insights", expanded=True):
-                st.markdown("""
-                <div class="insight-box">
-                """ + st.session_state.forecast_insights.replace('\n', '<br>') + """
-                </div>
-                """, unsafe_allow_html=True)
-            
-            st.markdown("---")
     
     if st.session_state.selected_forecast_series_multi is None or len(st.session_state.selected_forecast_series_multi) == 0:
         st.info("Fetch forecast data first from '🔮 Forecast Series' tab")
@@ -2249,7 +2190,7 @@ elif page == "🧮 Formula Builder":
     st.subheader("🧮 Create & Visualize Formulas")
     
     st.markdown("""
-    Build custom formulas with component visualization, blend insights, and outlook.
+    Build custom formulas with component visualization.
     """)
     
     st.divider()
@@ -2316,11 +2257,11 @@ elif page == "🧮 Formula Builder":
                 st.rerun()
 
 # ============================
-# APPLY FORMULAS PAGE WITH COMPONENT CURVES & INSIGHTS - FIXED
+# APPLY FORMULAS PAGE WITH COMPONENT CURVES
 # ============================
 
 elif page == "📊 Apply Formulas":
-    st.subheader("📊 Apply Formulas - Component Curves & Insights")
+    st.subheader("📊 Apply Formulas - Component Curves")
     
     df = st.session_state.df_pricing_data
     
@@ -2351,7 +2292,7 @@ elif page == "📊 Apply Formulas":
             
             st.divider()
             
-            # ✅ DISPLAY RESULTS IF THEY EXIST (FIXED!)
+            # DISPLAY RESULTS
             if st.session_state.current_formula is not None and not st.session_state.current_formula.empty:
                 result = st.session_state.current_formula
                 selected_name = st.session_state.get('current_formula_name', selected)
@@ -2369,7 +2310,7 @@ elif page == "📊 Apply Formulas":
                 
                 st.divider()
                 
-                # ✅ Component curves visualization
+                # Component curves visualization
                 st.subheader("📈 Component Curves vs Blend Price")
                 
                 fig = go.Figure()
@@ -2414,50 +2355,6 @@ elif page == "📊 Apply Formulas":
                 )
                 
                 st.plotly_chart(fig, use_container_width=True)
-                
-                st.divider()
-                
-                # ✅ Blend insights - NOW FIXED AND DISPLAYS!
-                st.subheader("🤖 Blend Analysis & Insights")
-                
-                col1, col2, col3 = st.columns([2, 1, 1])
-                
-                with col1:
-                    st.info(f"📦 Formula: **{selected_name}** | {len(selected_comps)} components")
-                
-                with col2:
-                    if st.button("🧠 Generate Insights", use_container_width=True, key="blend_insights_btn"):
-                        with st.spinner("🔍 Analyzing blend with AI..."):
-                            insights = generate_blend_insights(
-                                selected_name, 
-                                selected_comps, 
-                                result, 
-                                st.session_state.user_role
-                            )
-                            if insights:
-                                st.session_state.current_blend_insights = insights
-                                st.rerun()
-                            else:
-                                st.error("Failed to generate insights")
-                
-                with col3:
-                    if st.button("🔄 Clear", use_container_width=True):
-                        st.session_state.current_blend_insights = None
-                        st.rerun()
-                
-                st.divider()
-                
-                # ✅ DISPLAY INSIGHTS - THIS NOW WORKS!
-                if st.session_state.current_blend_insights:
-                    with st.container(border=True):
-                        st.markdown("""
-                        <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                                    padding: 20px; border-radius: 10px; border-left: 5px solid #00d4ff;">
-                        """ + st.session_state.current_blend_insights.replace('\n', '<br>') + """
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.info("👆 Click '🧠 Generate Insights' to analyze this blend")
 
         else:
             st.warning("⚠️ Create or select a formula first")
@@ -2516,87 +2413,6 @@ elif page == "📈 Compare Formulas":
                     ]).round(2)
                     
                     st.dataframe(stats, use_container_width=True)
-
-# ============================
-# AI INSIGHTS PAGE
-# ============================
-
-elif page == "🤖 AI Insights":
-    st.subheader("🤖 AI Market Insights")
-    
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
-        if st.button("📊 Pricing Insights", use_container_width=True):
-            if st.session_state.df_pricing_data is not None and not st.session_state.df_pricing_data.empty:
-                with st.spinner("🔍 Analyzing..."):
-                    insights = generate_data_pulled_insights(st.session_state.df_pricing_data, st.session_state.user_role)
-                    if insights:
-                        st.session_state.data_pulled_insights = insights
-                        st.rerun()
-    
-    with col2:
-        if st.button("🔮 Forecast Insights", use_container_width=True):
-            if st.session_state.df_forecast_data is not None and not st.session_state.df_forecast_data.empty:
-                with st.spinner("🔍 Analyzing..."):
-                    insights = generate_forecast_insights(st.session_state.df_forecast_data, st.session_state.user_role)
-                    if insights:
-                        st.session_state.forecast_insights = insights
-                        st.rerun()
-    
-    with col3:
-        if st.button("🧮 Formula Insights", use_container_width=True):
-            if st.session_state.current_formula is not None and not st.session_state.current_formula.empty:
-                st.info("Select a formula from 'Apply Formulas' first")
-    
-    st.divider()
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        if st.session_state.data_pulled_insights:
-            st.subheader("📊 Pricing Analysis")
-            st.markdown("""
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                        padding: 20px; border-radius: 10px; border-left: 5px solid #00d4ff;">
-            """ + st.session_state.data_pulled_insights.replace('\n', '<br>') + """
-            </div>
-            """, unsafe_allow_html=True)
-    
-    with col2:
-        if st.session_state.forecast_insights:
-            st.subheader("🔮 Forecast Analysis")
-            st.markdown("""
-            <div style="background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); 
-                        padding: 20px; border-radius: 10px; border-left: 5px solid #00d4ff;">
-            """ + st.session_state.forecast_insights.replace('\n', '<br>') + """
-            </div>
-            """, unsafe_allow_html=True)
-
-# ============================
-# CHAT PAGE
-# ============================
-
-elif page == "💬 Chat":
-    st.subheader("💬 Energy Expert Chat")
-    
-    for msg in st.session_state.chat_history:
-        with st.chat_message(msg["role"]):
-            st.markdown(msg["content"])
-    
-    user_input = st.chat_input("Ask about market, forecasts, formulas...")
-    
-    if user_input:
-        st.session_state.chat_history.append({"role": "user", "content": user_input})
-        
-        with st.chat_message("user"):
-            st.markdown(user_input)
-        
-        with st.chat_message("assistant"):
-            with st.spinner("🤖 Thinking..."):
-                response = call_groq_llm(f"User: {user_input}", system="You are an expert petrochemical market analyst.")
-                st.markdown(response)
-                st.session_state.chat_history.append({"role": "assistant", "content": response})
 
 # ============================
 # XML API SCRIPTS PAGE
@@ -2726,7 +2542,7 @@ elif page == "🐛 Debug Logs":
 st.divider()
 st.markdown("""
 <div style="text-align: center; color: #0f766e;">
-    <p><strong>🛢️ ICIS Pricing Dashboard - ENHANCED FINAL</strong></p>
-    <p>✅ AI Insights | ✅ Batched Forecast XML | ✅ Component Curves | ✅ Normalized Charts | ✅ Full Debugging | ✅ Blend Insights Display Fixed</p>
+    <p><strong>🛢️ ICIS Pricing Dashboard - ENHANCED</strong></p>
+    <p>✅ Batched Forecast XML | ✅ Component Curves | ✅ Normalized Charts | ✅ Full Debugging</p>
 </div>
 """, unsafe_allow_html=True)
