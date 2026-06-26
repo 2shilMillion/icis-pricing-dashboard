@@ -16,6 +16,7 @@ ICIS Pricing Dashboard - COMPLETE ENHANCED APPLICATION
 ✅ BATCHED Forecast XML (single request for all series)
 ✅ Component curves on blend charts
 ✅ Normalized charts showing applied units/currency
+✅ FIXED: Excel upload now works on Streamlit Cloud
 """
 
 import os
@@ -177,7 +178,7 @@ PREDEFINED_FORMULAS = {
 }
 
 # ============================
-# SESSION STATE
+# SESSION STATE INITIALIZATION
 # ============================
 
 if "session_id" not in st.session_state:
@@ -201,40 +202,33 @@ if "df_pricing_normalized" not in st.session_state:
 if "df_forecast_normalized" not in st.session_state:
     st.session_state.df_forecast_normalized = None
 
-# Excel import/autoselect session state
-if "real_excel_publications" not in st.session_state:
-    st.session_state.real_excel_publications = []
-if "real_excel_processed" not in st.session_state:
-    st.session_state.real_excel_processed = False
-if "auto_selected_real_series" not in st.session_state:
-    st.session_state.auto_selected_real_series = []
-
-if "forecast_excel_publications" not in st.session_state:
-    st.session_state.forecast_excel_publications = []
-if "forecast_excel_processed" not in st.session_state:
-    st.session_state.forecast_excel_processed = False
-
+# Real series selection
 if "selected_series_multi" not in st.session_state:
     st.session_state.selected_series_multi = []
 
+# Forecast series selection
 if "selected_forecast_series_multi" not in st.session_state:
     st.session_state.selected_forecast_series_multi = []
 
 if "selected_forecast_publication" not in st.session_state:
     st.session_state.selected_forecast_publication = None
 
+# Custom formulas
 if "custom_formulas" not in st.session_state:
     st.session_state.custom_formulas = {}
 
+# FX and forecasts
 if "fx_rates" not in st.session_state:
     st.session_state.fx_rates = {}
 
 if "forecasts" not in st.session_state:
     st.session_state.forecasts = {}
 
+# User role
 if "user_role" not in st.session_state:
     st.session_state.user_role = "Analyst"
 
+# Current formula tracking
 if "current_formula" not in st.session_state:
     st.session_state.current_formula = None
 
@@ -244,6 +238,7 @@ if "current_formula_name" not in st.session_state:
 if "current_formula_components" not in st.session_state:
     st.session_state.current_formula_components = []
 
+# Normalization settings
 if "current_normalization_currency" not in st.session_state:
     st.session_state.current_normalization_currency = "USD"
 
@@ -375,16 +370,18 @@ def process_publications_excel(excel_file):
     """Extract publication names from an uploaded Excel workbook"""
     try:
         df = pd.read_excel(excel_file)
-        # find a column that looks like 'publication'
+        # Find a column that looks like 'publication'
         pub_cols = [c for c in df.columns if 'publication' in str(c).lower()]
         if not pub_cols:
-            # try common alternatives
+            # Try common alternatives
             pub_cols = [c for c in df.columns if 'pub' in str(c).lower()]
 
         if not pub_cols:
+            log_debug("Excel Processing", f"No publication column found. Columns: {list(df.columns)}")
             return []
 
         pubs = df[pub_cols[0]].dropna().astype(str).str.strip().unique().tolist()
+        log_debug("Excel Processing", f"Extracted {len(pubs)} publications")
         return pubs
     except Exception as e:
         log_debug("Excel Processing Error", str(e))
@@ -713,7 +710,7 @@ def parse_pricing_data(response_content):
             
             for col in ['Low', 'High', 'Mid']:
                 if col in df.columns:
-                    # strip non-numeric characters (commas, currency symbols) before conversion
+                    # Strip non-numeric characters (commas, currency symbols) before conversion
                     df[col] = df[col].astype(str).str.replace(r"[^0-9.\-]", "", regex=True)
                     df[col] = pd.to_numeric(df[col], errors='coerce')
         
@@ -950,7 +947,7 @@ def fetch_pricing_data(username, password, series_ids, start_date, end_date):
     except requests.exceptions.HTTPError as he:
         resp = he.response
         if resp is not None and resp.status_code == 409:
-            # server-side schema validation conflict - attempt batched requests
+            # Server-side schema validation conflict - attempt batched requests
             log_debug("Fetch Pricing HTTPError 409", resp.text[:400])
             st.warning("⚠️ 409 Conflict from API — attempting batched requests (chunks of 100)")
             return fetch_pricing_data_batched(username, password, series_ids, start_date, end_date, chunk_size=100)
@@ -1068,7 +1065,7 @@ def fetch_pricing_data_batched(username, password, series_ids, start_date, end_d
                 msg = f"Batch {batch_idx} HTTP {resp.status_code}: {resp.text[:1000]}"
                 log_debug("Fetch Pricing Batch HTTPError", msg[:200])
                 st.error(f"❌ {msg}")
-                # skip this batch and continue
+                # Skip this batch and continue
                 continue
 
             df_part = parse_pricing_data(response.content)
@@ -1082,7 +1079,7 @@ def fetch_pricing_data_batched(username, password, series_ids, start_date, end_d
             return pd.DataFrame()
 
         df_total = pd.concat(all_parts, ignore_index=True)
-        # de-duplicate on Series Name + Date + Location
+        # De-duplicate on Series Name + Date + Location
         if {'Series Name', 'Date'}.issubset(df_total.columns):
             df_total = df_total.drop_duplicates(subset=['Series Name', 'Date'], keep='first').reset_index(drop=True)
 
@@ -1540,7 +1537,7 @@ if page == "📊 Dashboard":
         """)
 
 # ============================
-# REAL SERIES PAGE
+# REAL SERIES PAGE - FIXED FOR CLOUD
 # ============================
 
 elif page == "🔍 Real Series":
@@ -1572,62 +1569,99 @@ elif page == "🔍 Real Series":
     if df_list is None or df_list.empty:
         st.info("Click 'Load Series' to start")
     else:
+        # ============================================
+        # EXCEL UPLOAD & FUZZY MATCH - FIXED FOR CLOUD
+        # ============================================
         st.subheader("📋 Quick Load via Excel")
-        excel_file = st.file_uploader("Upload Publications Excel (xlsx/xls)", type=["xlsx", "xls"], key="real_excel_upload")
-        if excel_file is not None and not st.session_state.real_excel_processed:
-            pubs = process_publications_excel(excel_file)
-            if pubs:
-                st.session_state.real_excel_publications = pubs
-                st.session_state.real_excel_processed = True
-                st.success(f"✅ Loaded {len(pubs)} publications from Excel")
-            else:
-                st.warning("No publications found in Excel")
-
-        if st.session_state.real_excel_processed and st.session_state.real_excel_publications:
-            st.markdown("**Publications from Excel:**")
-            for p in st.session_state.real_excel_publications:
-                st.write(f"- {p}")
-
-            # allow threshold tweak
-            fuzzy_thresh = st.slider("Fuzzy match threshold", 0.4, 0.95, 0.6, 0.05, key="real_fuzzy_thresh")
-            if st.button("🎯 Auto-Select from Excel (Fuzzy Match)", key="auto_select_from_excel_real"):
-                api_pubs = sorted(df_list['Publication Name'].unique().tolist())
-                st.session_state.auto_selected_real_series = []
-                seen = set()
-                for ep in st.session_state.real_excel_publications:
-                    matched, score = fuzzy_match_publication(ep, api_pubs, threshold=fuzzy_thresh)
-                    if matched:
-                        rows = df_list[df_list['Publication Name'] == matched]
-                        for _, r in rows.iterrows():
-                            sid = r['Series ID']
-                            if sid not in seen:
-                                st.session_state.auto_selected_real_series.append({
-                                    'Series Name': r['Series Name'],
-                                    'Series ID': sid,
-                                    'Publication': matched
-                                })
-                                seen.add(sid)
-                    # record match summary for UI (matched or not)
-                    if 'matches_summary_real' not in st.session_state:
-                        st.session_state.matches_summary_real = []
-                    st.session_state.matches_summary_real.append({
-                        'Excel Publication': ep,
-                        'Matched Publication': matched if matched else '',
-                        'Score': round(score, 3) if matched else 0.0,
-                        'Matched': '✓' if matched else '✗'
-                    })
-                # merge into selected_series_multi without duplicates
-                for s in st.session_state.auto_selected_real_series:
-                    if not any(x['Series ID'] == s['Series ID'] for x in st.session_state.selected_series_multi):
-                        st.session_state.selected_series_multi.append(s)
-                st.success(f"✅ Auto-selected {len(st.session_state.auto_selected_real_series)} series")
-                # show a summary table of matches
-                if st.session_state.get('matches_summary_real'):
-                    ms_df = pd.DataFrame(st.session_state.matches_summary_real)
+        
+        excel_file = st.file_uploader(
+            "Upload Publications Excel (xlsx/xls)", 
+            type=["xlsx", "xls"], 
+            key="real_excel_upload_key"  # ✅ STABLE KEY
+        )
+        
+        if excel_file is not None:
+            # ✅ ALWAYS PROCESS (no session state flag)
+            try:
+                pubs = process_publications_excel(excel_file)
+                
+                if pubs and len(pubs) > 0:
+                    st.success(f"✅ Loaded {len(pubs)} publications from Excel")
+                    
+                    st.markdown("**Publications from Excel:**")
+                    for p in pubs:
+                        st.write(f"- {p}")
+                    
                     st.divider()
-                    st.subheader("🔎 Excel -> Publication Match Summary")
-                    st.dataframe(ms_df, use_container_width=True)
-                st.rerun()
+                    
+                    # ✅ Fuzzy match controls
+                    fuzzy_thresh = st.slider(
+                        "Fuzzy match threshold", 
+                        0.4, 0.95, 0.6, 0.05, 
+                        key="real_fuzzy_thresh"
+                    )
+                    
+                    if st.button("🎯 Auto-Select from Excel (Fuzzy Match)", key="auto_select_real_btn"):
+                        api_pubs = sorted(df_list['Publication Name'].unique().tolist())
+                        
+                        matched_series = []
+                        match_summary = []
+                        seen = set()
+                        
+                        for excel_pub in pubs:
+                            matched_pub, score = fuzzy_match_publication(
+                                excel_pub, 
+                                api_pubs, 
+                                threshold=fuzzy_thresh
+                            )
+                            
+                            match_summary.append({
+                                'Excel Publication': excel_pub,
+                                'Matched Publication': matched_pub if matched_pub else '(No Match)',
+                                'Score': round(score, 3),
+                                'Status': '✓ Matched' if matched_pub else '✗ No Match'
+                            })
+                            
+                            if matched_pub:
+                                rows = df_list[df_list['Publication Name'] == matched_pub]
+                                for _, r in rows.iterrows():
+                                    sid = r['Series ID']
+                                    if sid not in seen:
+                                        matched_series.append({
+                                            'Series Name': r['Series Name'],
+                                            'Series ID': sid,
+                                            'Publication': matched_pub
+                                        })
+                                        seen.add(sid)
+                        
+                        # ✅ Update session state with deduplication
+                        st.session_state.selected_series_multi.extend(matched_series)
+                        unique_ids = set()
+                        deduplicated = []
+                        for s in st.session_state.selected_series_multi:
+                            if s['Series ID'] not in unique_ids:
+                                deduplicated.append(s)
+                                unique_ids.add(s['Series ID'])
+                        st.session_state.selected_series_multi = deduplicated
+                        
+                        st.success(f"✅ Auto-selected {len(matched_series)} series")
+                        
+                        # ✅ Show match summary
+                        st.divider()
+                        st.subheader("🔎 Match Summary")
+                        summary_df = pd.DataFrame(match_summary)
+                        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                else:
+                    st.warning("⚠️ No publications found in Excel file")
+            
+            except Exception as e:
+                st.error(f"❌ Error processing Excel: {str(e)}")
+                log_debug("Excel Processing Error", str(e))
+        
+        # ============================================
+        # MANUAL SERIES SELECTION
+        # ============================================
         st.subheader(f"📋 Available Series: {len(df_list)}")
         
         col1, col2, col3 = st.columns(3)
@@ -1697,7 +1731,7 @@ elif page == "🔍 Real Series":
                         st.rerun()
 
 # ============================
-# FORECAST SERIES PAGE
+# FORECAST SERIES PAGE - FIXED FOR CLOUD
 # ============================
 
 elif page == "🔮 Forecast Series":
@@ -1797,59 +1831,90 @@ elif page == "🔮 Forecast Series":
                         st.rerun()
                     else:
                         st.warning("No forecast data retrieved")
-
-        # ===== Forecast Excel import & auto-select =====
+        
+        # ============================================
+        # FORECAST EXCEL UPLOAD & FUZZY MATCH - FIXED FOR CLOUD
+        # ============================================
         st.divider()
         st.subheader("📋 Quick Load Forecasts via Excel")
-        f_excel = st.file_uploader("Upload Forecast Publications Excel (xlsx/xls)", type=["xlsx", "xls"], key="forecast_excel_upload")
-        if f_excel is not None and not st.session_state.forecast_excel_processed:
-            pubs = process_publications_excel(f_excel)
-            if pubs:
-                st.session_state.forecast_excel_publications = pubs
-                st.session_state.forecast_excel_processed = True
-                st.success(f"✅ Loaded {len(pubs)} publications from Excel")
-            else:
-                st.warning("No publications found in Excel")
-
-        if st.session_state.forecast_excel_processed and st.session_state.forecast_excel_publications:
-            st.markdown("**Publications from Excel:**")
-            for p in st.session_state.forecast_excel_publications:
-                st.write(f"- {p}")
-
-            f_thresh = st.slider("Forecast fuzzy threshold", 0.4, 0.95, 0.6, 0.05, key="fcst_fuzzy_thresh")
-            if st.button("🎯 Auto-Select Forecasts from Excel (Fuzzy Match)", key="auto_select_from_excel_fcst"):
-                api_pubs = sorted(df_fcst['Publication Name'].unique().tolist())
-                st.session_state.selected_forecast_series_multi = []
-                seen = set()
-                for ep in st.session_state.forecast_excel_publications:
-                    matched, score = fuzzy_match_publication(ep, api_pubs, threshold=f_thresh)
-                    if matched:
-                        rows = df_fcst[df_fcst['Publication Name'] == matched]
-                        for _, r in rows.iterrows():
-                            sid = r['Series ID']
-                            if sid not in seen:
-                                st.session_state.selected_forecast_series_multi.append({
-                                    'Series Name': r['Series Name'],
-                                    'Series ID': sid,
-                                    'Publication': matched
-                                })
-                                seen.add(sid)
-                    # record match summary for UI
-                    if 'matches_summary_fcst' not in st.session_state:
-                        st.session_state.matches_summary_fcst = []
-                    st.session_state.matches_summary_fcst.append({
-                        'Excel Publication': ep,
-                        'Matched Publication': matched if matched else '',
-                        'Score': round(score, 3) if matched else 0.0,
-                        'Matched': '✓' if matched else '✗'
-                    })
-                st.success(f"✅ Auto-selected {len(st.session_state.selected_forecast_series_multi)} forecast series")
-                if st.session_state.get('matches_summary_fcst'):
-                    ms_df = pd.DataFrame(st.session_state.matches_summary_fcst)
+        
+        f_excel = st.file_uploader(
+            "Upload Forecast Publications Excel (xlsx/xls)", 
+            type=["xlsx", "xls"], 
+            key="forecast_excel_upload_key"  # ✅ STABLE KEY
+        )
+        
+        if f_excel is not None:
+            # ✅ ALWAYS PROCESS (no session state flag)
+            try:
+                pubs = process_publications_excel(f_excel)
+                
+                if pubs and len(pubs) > 0:
+                    st.success(f"✅ Loaded {len(pubs)} publications from Excel")
+                    
+                    st.markdown("**Publications from Excel:**")
+                    for p in pubs:
+                        st.write(f"- {p}")
+                    
                     st.divider()
-                    st.subheader("🔎 Excel -> Publication Match Summary (Forecast)")
-                    st.dataframe(ms_df, use_container_width=True)
-                st.rerun()
+                    
+                    # ✅ Fuzzy match controls
+                    fcst_thresh = st.slider(
+                        "Forecast fuzzy threshold", 
+                        0.4, 0.95, 0.6, 0.05, 
+                        key="fcst_fuzzy_thresh"
+                    )
+                    
+                    if st.button("🎯 Auto-Select Forecasts (Fuzzy Match)", key="auto_select_fcst_btn"):
+                        api_pubs = sorted(df_fcst['Publication Name'].unique().tolist())
+                        
+                        matched_series = []
+                        match_summary = []
+                        seen = set()
+                        
+                        for excel_pub in pubs:
+                            matched_pub, score = fuzzy_match_publication(
+                                excel_pub, 
+                                api_pubs, 
+                                threshold=fcst_thresh
+                            )
+                            
+                            match_summary.append({
+                                'Excel Publication': excel_pub,
+                                'Matched Publication': matched_pub if matched_pub else '(No Match)',
+                                'Score': round(score, 3),
+                                'Status': '✓ Matched' if matched_pub else '✗ No Match'
+                            })
+                            
+                            if matched_pub:
+                                rows = df_fcst[df_fcst['Publication Name'] == matched_pub]
+                                for _, r in rows.iterrows():
+                                    sid = r['Series ID']
+                                    if sid not in seen:
+                                        matched_series.append({
+                                            'Series Name': r['Series Name'],
+                                            'Series ID': sid,
+                                            'Publication': matched_pub
+                                        })
+                                        seen.add(sid)
+                        
+                        # ✅ Update session state
+                        st.session_state.selected_forecast_series_multi = matched_series
+                        
+                        st.success(f"✅ Auto-selected {len(matched_series)} forecast series")
+                        
+                        # ✅ Show match summary
+                        st.divider()
+                        st.subheader("🔎 Forecast Match Summary")
+                        summary_df = pd.DataFrame(match_summary)
+                        st.dataframe(summary_df, use_container_width=True, hide_index=True)
+                
+                else:
+                    st.warning("⚠️ No publications found in Excel file")
+            
+            except Exception as e:
+                st.error(f"❌ Error processing Excel: {str(e)}")
+                log_debug("Forecast Excel Error", str(e))
 
 # ============================
 # PRICING DATA PAGE
@@ -2183,7 +2248,7 @@ elif page == "🔮 ML Forecasts":
                         st.plotly_chart(fig, use_container_width=True)
 
 # ============================
-# FORMULA BUILDER PAGE WITH COMPONENT VISUALIZATION
+# FORMULA BUILDER PAGE
 # ============================
 
 elif page == "🧮 Formula Builder":
@@ -2257,7 +2322,7 @@ elif page == "🧮 Formula Builder":
                 st.rerun()
 
 # ============================
-# APPLY FORMULAS PAGE WITH COMPONENT CURVES
+# APPLY FORMULAS PAGE
 # ============================
 
 elif page == "📊 Apply Formulas":
