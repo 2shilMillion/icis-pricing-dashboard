@@ -370,6 +370,37 @@ def process_publications_excel(excel_file):
     """Extract publication names from an uploaded Excel workbook"""
     try:
         df = pd.read_excel(excel_file)
+        
+        # Debug: Show what we're working with
+        print(f"Columns found: {list(df.columns)}")
+        print(f"First few rows:\n{df.head()}")
+        
+        # Look for Publications column (case-insensitive)
+        pub_col = None
+        for c in df.columns:
+            if 'publication' in str(c).lower():
+                pub_col = c
+                break
+        
+        if pub_col is None:
+            log_debug("Excel Processing", f"No publication column found. Columns: {list(df.columns)}")
+            return []
+        
+        # Extract publications from the column
+        pubs = df[pub_col].dropna().astype(str).str.strip().unique().tolist()
+        
+        # Filter out empty strings and common noise
+        pubs = [p for p in pubs if p and p.lower() not in ['nan', '', 'publications', 'name']]
+        
+        log_debug("Excel Processing", f"Extracted {len(pubs)} publications: {pubs}")
+        return pubs
+    
+    except Exception as e:
+        log_debug("Excel Processing Error", str(e)[:200])
+        return []
+    """Extract publication names from an uploaded Excel workbook"""
+    try:
+        df = pd.read_excel(excel_file)
         # Find a column that looks like 'publication'
         pub_cols = [c for c in df.columns if 'publication' in str(c).lower()]
         if not pub_cols:
