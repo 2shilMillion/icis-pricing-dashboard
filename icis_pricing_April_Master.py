@@ -371,6 +371,49 @@ def process_publications_excel(excel_file):
     try:
         df = pd.read_excel(excel_file)
         
+        # Debug output
+        st.write(f"**DEBUG - Columns found:** {list(df.columns)}")
+        st.write(f"**DEBUG - First row:** {df.iloc[0].to_dict() if len(df) > 0 else 'Empty'}")
+        st.write(f"**DEBUG - Data shape:** {df.shape}")
+        
+        # Look for Publications column (case-insensitive)
+        pub_col = None
+        for c in df.columns:
+            col_lower = str(c).lower().strip()
+            st.write(f"Checking column: '{c}' (lowercase: '{col_lower}')")
+            if 'publication' in col_lower:
+                pub_col = c
+                st.success(f"✅ Found publication column: '{pub_col}'")
+                break
+        
+        if pub_col is None:
+            st.error(f"❌ No publication column found. Columns: {list(df.columns)}")
+            log_debug("Excel Processing", f"No publication column found. Columns: {list(df.columns)}")
+            return []
+        
+        # Extract publications from the column
+        pubs = df[pub_col].dropna().astype(str).str.strip().unique().tolist()
+        
+        st.write(f"**DEBUG - Raw pubs extracted:** {pubs}")
+        
+        # Filter out empty strings and common noise
+        pubs = [p for p in pubs if p and p.lower() not in ['nan', '', 'publications', 'name']]
+        
+        st.write(f"**DEBUG - Filtered pubs:** {pubs}")
+        
+        log_debug("Excel Processing", f"Extracted {len(pubs)} publications: {pubs}")
+        return pubs
+    
+    except Exception as e:
+        st.error(f"**EXCEPTION:** {str(e)}")
+        log_debug("Excel Processing Error", str(e)[:200])
+        import traceback
+        st.write(traceback.format_exc())
+        return []
+    """Extract publication names from an uploaded Excel workbook"""
+    try:
+        df = pd.read_excel(excel_file)
+        
         # Debug: Show what we're working with
         print(f"Columns found: {list(df.columns)}")
         print(f"First few rows:\n{df.head()}")
